@@ -2,122 +2,189 @@
 
 [English](#english) | [简体中文](#简体中文)
 
-A lightweight, unofficial macOS utility for Gemini Desktop tool-permission dialogs. It uses built-in JavaScript for Automation (JXA) and macOS Accessibility APIs without simulating keyboard shortcuts.
+A lightweight, unofficial Gemini Desktop permission-dialog utility using macOS JavaScript for Automation (JXA) and Accessibility APIs.
 
 ## English
 
-### Two versions
+### Two versions, one engine
 
-| Version | Start command | Behavior |
+| Version | Launcher | Default configuration |
 | --- | --- | --- |
-| Observer (default) | `./observe.sh` | Detects permission dialogs without clicking. |
-| Full Auto | `./auto-approve.sh` | Automatically clicks Allow on supported, unambiguous Gemini tool-permission dialogs. |
+| Blank / Custom (default) | `./observe.sh` | Empty allowlist; observes without clicking. |
+| Preset | `./auto-approve.sh` | Three previously observed browser tool names. |
 
-Full Auto does not require a tool-name allowlist or inspect request content. It is an explicit opt-in, not the default for the shared script.
+Both use the same code and exact-name approval policy. Only their initial configuration differs. Unlisted or ambiguous dialogs remain manual. There is no unrestricted approve-all mode in this version.
 
 ### Install
-
-Requirements: macOS, a compatible Gemini Desktop build (bundle ID `com.google.GeminiMacOS`), and Accessibility access for the script runner. No API key or third-party library is needed.
 
 ```sh
 git clone https://github.com/cerry-icdats/gemini-auto-approve.git
 cd gemini-auto-approve
-osascript -l JavaScript gemini-auto-approve.jxa.js --self-test
+./observe.sh --self-test
 ```
 
-If required, manually grant Accessibility access to the terminal or process running the script in System Settings > Privacy & Security > Accessibility.
+Requirements: macOS, a compatible Gemini Desktop build (bundle ID `com.google.GeminiMacOS`), and Accessibility permission for the process running the script. Grant this manually in System Settings > Privacy & Security > Accessibility if needed. No API key or third-party libraries are required.
 
-### A. Observer
+### A. Blank / Custom
 
 ```sh
 ./observe.sh
 ```
 
-### B. Full Auto
+Initially no requests are automatically approved. To add your own tool names, copy and edit the local configuration:
+
+```sh
+cp -n config.example.json config.json
+```
+
+Example:
+
+```json
+{
+  "allowed_tools": ["Browse  Tabs", "Browse  Status"]
+}
+```
+
+Use the exact tool names shown in a supported dialog or local log. Spaces and capitalization matter. Stop the monitor with Control-C and restart after editing.
+
+### B. Preset
 
 ```sh
 ./auto-approve.sh
 ```
 
-Once started, this version automatically handles supported dialogs without requiring confirmation for each tool. Press Control-C to stop. Running the shared JXA script without options defaults to observation.
+The shipped `config.preset.json` contains:
 
-### Supported dialogs
+```json
+{
+  "allowed_tools": [
+    "Browse  Execute",
+    "Browse  Tabs",
+    "Browse  Status"
+  ]
+}
+```
 
-The detector looks for Gemini's permission message:
+These are generic browser tool names observed in actual permission dialogs. To customize the preset without changing tracked files:
 
-> Allow Gemini to run [tool name] on your machine?
+```sh
+cp -n config.preset.json config.preset.local.json
+```
 
-It recognizes the corresponding Allow and Cancel buttons, including Allow Once and Deny variants, English and Simplified Chinese button labels, and supported keyboard-shortcut label variants. Example dialog tool names include Call Tool, Browse Execute and Browse Tabs. The implementation also recognizes other names matching the same message format; it does not click arbitrary buttons or unrelated system prompts.
+Edit the local copy and restart. Both local configuration files are ignored by Git.
 
-Ambiguous dialogs, oversized requests and repeated pending clicks are guarded against. UI changes may require updates.
+### Supported dialogs and safety
 
-### Important safety information
+Matches the Gemini message `Allow Gemini to run [tool name] on your machine?` with recognized Allow/Cancel buttons, including English and Simplified Chinese button labels. Does not click unrelated applications or macOS system prompts. Unlisted names, generic command wrappers, missing request details, obvious sensitive keyword matches and ambiguous dialogs remain manual. Wildcards are not supported.
 
-Full Auto approves recognized requests without reviewing their operations. Depending on connected tools, it could approve file changes, deletion, commands or external transmission. Use only in a trusted, isolated environment with least-privilege tools and no sensitive information. It is not a security boundary. Keep Observer mode for sensitive work. The utility does not grant macOS permissions itself.
+Browser execution can still change websites or transmit information. Keyword filters and exact names are not a sandbox and cannot prove a request safe. Only approve tools you trust in a least-privilege isolated environment. Leave sensitive work in observation mode.
 
-### Stop, diagnose and test
+### Diagnose and stop
+
+```sh
+./observe.sh --check-config
+./auto-approve.sh --check-config
+./auto-approve.sh --dry-run
+tail -f ~/Library/Logs/gemini-auto-approve-runtime.log
+```
 
 - Control-C stops monitoring.
-- Append `--once` to either launcher for one scan.
-- Logs: `~/Library/Logs/gemini-auto-approve-runtime.log`.
-- If no dialogs are detected, check Gemini is running, Accessibility permission is granted, and the prompt matches the supported format.
-- No login item or background service is installed automatically.
-- The shared script also retains an optional exact-name allowlist mode using `--enable --allow-tool=NAME`; its heuristic checks are not a sandbox.
-- Self-tests verify parsing and policy logic, not live UI behavior on every Gemini version.
+- Append `--once` for one scan, or `--dry-run` to prevent all clicks.
+- Invalid configuration fails closed. Restart to reload configuration.
+- No login item is automatically installed.
+- Self-tests check parsing and policy, not live compatibility with every Gemini release.
 
 ## 简体中文
 
-这是一个非官方 macOS 小工具，用来处理 Gemini 桌面端反复出现的工具授权弹窗。不需要 API Key 或第三方依赖。
+这是一个非官方 macOS 小工具，识别 Gemini 桌面版的工具授权弹窗，无需 API Key 或第三方依赖。
 
-### 两个版本
+### 两个版本，同一套代码
 
-| 版本 | 启动命令 | 功能 |
+| 版本 | 启动命令 | 默认配置 |
 | --- | --- | --- |
-| 观察版（默认） | `./observe.sh` | 识别弹窗，不自动点击。 |
-| 全自动版 | `./auto-approve.sh` | 对已识别的明确授权弹窗自动点击允许，无需逐个设置工具名。 |
+| 空白／自定义版（默认） | `./observe.sh` | 白名单为空，只观察不点击。 |
+| 预设版 | `./auto-approve.sh` | 已预设三种实际识别过的浏览器工具名称。 |
+
+两版使用完全相同的核心代码和审批逻辑，仅默认配置不同。不在名单里的请求仍手动确认，不提供无限制全自动模式。
 
 ### 安装
 
 ```sh
 git clone https://github.com/cerry-icdats/gemini-auto-approve.git
 cd gemini-auto-approve
-osascript -l JavaScript gemini-auto-approve.jxa.js --self-test
+./observe.sh --self-test
 ```
 
-如有需要，在 macOS「系统设置 → 隐私与安全性 → 辅助功能」手动授权运行脚本的终端或进程。
+如有需要，在 macOS「系统设置 → 隐私与安全性 → 辅助功能」手动授权运行脚本的进程。
 
-### 使用方式
-
-观察版：
+### A. 空白／自定义版
 
 ```sh
 ./observe.sh
 ```
 
-全自动版：
+默认不自动同意任何弹窗。想自动同意自己选定的工具时，先复制配置：
+
+```sh
+cp -n config.example.json config.json
+```
+
+用文本编辑器打开 `config.json`，例如：
+
+```json
+{
+  "allowed_tools": ["Browse  Tabs", "Browse  Status"]
+}
+```
+
+工具名称以实际弹窗或日志为准，注意大小写和空格。修改后按 Control-C 停止，再重新启动。
+
+### B. 预设版
 
 ```sh
 ./auto-approve.sh
 ```
 
-启动全自动版后，符合识别规则的 Gemini 工具授权弹窗会自动点击允许，不用每次手动确认。按 Control-C 停止。
+预设配置 `config.preset.json`：
 
-### 支持哪些弹窗？
+```json
+{
+  "allowed_tools": [
+    "Browse  Execute",
+    "Browse  Tabs",
+    "Browse  Status"
+  ]
+}
+```
+
+这些是实际授权弹窗中识别过的通用浏览器工具名称。想修改预设版时，先复制配置：
+
+```sh
+cp -n config.preset.json config.preset.local.json
+```
+
+编辑本地副本，再重启程序。两份个人配置均不纳入 Git。
+
+### 识别范围与安全说明
 
 匹配 Gemini 的通用工具授权提示：
 
 > Allow Gemini to run [工具名称] on your machine?
 
-支持 Call Tool、Browse Execute、Browse Tabs 等采用相同提示格式的工具授权，以及允许、允许一次、取消、拒绝等中英文按钮和已识别的快捷键标签。不会点击无关软件或 macOS 系统权限弹窗。多个弹窗无法明确区分时，不自动点击。
+支持已识别的中英文允许、取消按钮。不点击其他软件或 macOS 系统权限弹窗。未列入白名单、通用命令包装器、缺少请求详情、命中通用敏感关键词或无法明确识别的弹窗均保留手动确认。不支持通配符。
 
-### 注意事项
+浏览器执行工具仍可能操作网页或传输数据。关键词与工具名过滤不是安全沙箱，不能保证所有请求安全。建议只在可信、隔离、最小权限的环境中使用，敏感工作使用纯观察模式。
 
-全自动版不检查请求内容，也不依赖工具名称或内容关键词白名单。根据已连接工具的能力，它可能批准文件修改、删除、命令执行或数据外发。请仅在可信、隔离、最小权限且没有敏感信息的环境中使用。敏感工作建议使用观察版。
+### 查看工具名称、检查配置和停止
 
-- 两个版本都支持追加 `--once` 只扫描一次。
-- 日志位于 `~/Library/Logs/gemini-auto-approve-runtime.log`。
-- 默认不安装开机启动服务。
-- 自测覆盖识别逻辑和模式规则，不代表所有 Gemini 版本均已完成真实界面测试。
+```sh
+./observe.sh --check-config
+./auto-approve.sh --check-config
+./auto-approve.sh --dry-run
+tail -f ~/Library/Logs/gemini-auto-approve-runtime.log
+```
+
+按 Control-C 停止。追加 `--once` 仅扫描一次，追加 `--dry-run` 强制不点击。配置错误时停止，不会自动放宽权限。默认不安装开机启动项。自测不等于所有 Gemini 版本的真实界面验证。
 
 ## License
 

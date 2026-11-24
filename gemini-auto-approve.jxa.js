@@ -1,7 +1,7 @@
 #!/usr/bin/osascript -l JavaScript
 // Gemini Desktop continuous tool-permission monitor.
 // Uses macOS Accessibility APIs to observe Gemini Desktop permission prompts.
-// Audit-only by default. Automatic approval of recognized dialogs is explicit opt-in.
+// Shared engine for empty and preconfigured exact-name allowlists.
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
 ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['unsigned int']]);
@@ -18,7 +18,6 @@ function geminiIsFrontmost() {
 }
 // Defense in depth only: keyword checks cannot establish that an operation is safe.
 let allowedTools = [];
-let approveAll = false;
 const blockedPatterns = [
   'rm -rf','rm -r ','rm -f ','sudo ','git push','git reset --hard',
   'git clean -fd','git clean -df','diskutil erase','mkfs',
@@ -86,9 +85,8 @@ function allow(el) {
 }
 // Fail closed for unknown tools, opaque requests and obvious sensitive actions.
 function checkSafety(tool, detail) {
-  if (approveAll) return null;
   if (!allowedTools.includes(tool)) return 'tool not explicitly allowlisted';
-  if (/call tool|terminal|shell|execute|script|command|write|edit|delete|upload|send|permission/i.test(tool))
+  if (tool !== 'Browse  Execute' && /call tool|terminal|shell|execute|script|command|write|edit|delete|upload|send|permission/i.test(tool))
     return 'generic or potentially mutating tool';
   if (!detail.trim()) return 'request details unavailable';
   const lower = detail.toLowerCase();
@@ -150,8 +148,7 @@ function tick(dry) {
     return;
   }
   const found = findCandidates();
-  if (!found.length) { lastSignature=null; attempts=0; lastBlocked=null; return; }
-  lastDiagnostic = null;
+  if (!found.length) { lastSignature=null; attempts=0; lastBlocked=null; lastDiagnostic=null; return; }
   if (found.length !== 1) {
     if (lastBlocked !== 'ambiguous') log('BLOCKED multiple permission dialogs');
     lastBlocked='ambiguous';
@@ -190,16 +187,49 @@ function tick(dry) {
     log('PRESS_FAILED '+c.tool+' AX='+status);
   }
 }
+function parseConfig(raw) {
+  const c=JSON.parse(raw);
+  if (!c || typeof c !== 'object' || Array.isArray(c) ||
+      Object.keys(c).some(k => k !== 'allowed_tools') ||
+      !Array.isArray(c.allowed_tools) ||
+      c.allowed_tools.some(x => typeof x !== 'string' || !x.trim() ||
+        x !== x.trim() || /[\r\n]/.test(x) || x.includes('*')))
+    throw Error('Invalid config: expected allowed_tools array of exact tool names');
+  return [...new Set(c.allowed_tools)];
+}
+function readConfig(path) {
+  const raw=ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(
+    $(path), $.NSUTF8StringEncoding, null));
+  if (typeof raw !== 'string') throw Error('Cannot read config file');
+  return parseConfig(raw);
+}
+function rejectsConfig(raw) {
+  try { parseConfig(raw); return false; } catch(e) { return true; }
+}
+function modeFor(argv, configTools) {
+  const configured=configTools !== null;
+  if (argv.includes('--approve-all')) throw Error('Use an explicit allowed_tools configuration instead');
+  const tools=configured ? configTools :
+    argv.filter(x=>x.startsWith('--allow-tool=')).map(x=>x.slice(13)).filter(Boolean);
+  const dry=argv.includes('--dry-run') ||
+    (configured ? tools.length===0 : !argv.includes('--enable'));
+  return {tools, dry};
+}
 function run(argv) {
-  const once=argv.indexOf('--once')>=0;
-  approveAll=argv.includes('--approve-all') && !argv.includes('--dry-run');
-  const dry=(!approveAll && !argv.includes('--enable')) || argv.includes('--dry-run');
-  allowedTools=argv.filter(x=>x.startsWith('--allow-tool=')).map(x=>x.slice(13)).filter(Boolean);
-  if (!dry && !approveAll && !allowedTools.length) throw Error('Active mode requires --allow-tool=EXACT_TOOL_NAME');
+  const once=argv.includes('--once');
+  const configArg=argv.find(x=>x.startsWith('--config='));
+  const configTools=configArg ? readConfig(configArg.slice(9)) : null;
+  const mode=modeFor(argv, configTools);
+  allowedTools=mode.tools;
+  const dry=mode.dry;
+  if (!dry && !allowedTools.length) throw Error('Active mode requires --allow-tool=EXACT_TOOL_NAME');
+  if (argv.includes('--check-config')) {
+    if (!configArg) throw Error('--check-config requires --config=PATH');
+    return 'CONFIG OK: '+(dry?'observer':'allowlist')+'; '+allowedTools.length+' exact tool name(s); no clicks';
+  }
 
   if (argv.indexOf('--self-test') >= 0) {
-    approveAll=false;
-    allowedTools=['Read Documentation', 'Call Tool', 'Terminal Task'];
+    allowedTools=['Read Documentation', 'Call Tool', 'Terminal Task', 'Browse  Execute', 'Browse  Tabs', 'Browse  Status'];
     const cases = [
       [toolOf('Allow Gemini to run Read Documentation on your machine?') === 'Read Documentation', 'prompt recognition'],
       [toolOf('unrelated text') === null, 'unrelated prompt rejected'],
@@ -217,13 +247,29 @@ function run(argv) {
       [toolOf('Allow Gemini to run Browse  Tabs on your machine?') === 'Browse  Tabs', 'browser tabs dialog'],
       [toolOf('Allow another app to run a tool?') === null, 'other app rejected']
     );
-    approveAll=true;
-    cases.push([checkSafety('Call Tool', '') === null, 'full-auto recognizes generic tool']);
-    approveAll=false;
+    cases.push(
+      [parseConfig('{"allowed_tools":[]}').length===0, 'empty config'],
+      [parseConfig('{"allowed_tools":["Read Documentation","Read Documentation"]}').length===1, 'deduplicate'],
+      [parseConfig('{"allowed_tools":["Browse  Tabs"]}')[0]==='Browse  Tabs', 'preserve exact spaces'],
+      [rejectsConfig('{"allowed_tools":["*"]}'), 'wildcards rejected'],
+      [rejectsConfig('{"allowed_tools":"Read Documentation"}'), 'invalid config rejected'],
+      [rejectsConfig('{"allowed_tools":[],"approve_all":true}'), 'unexpected settings rejected'],
+      [modeFor([],[]).dry, 'empty config observes'],
+      [!modeFor([],['Read Documentation']).dry, 'nonempty config enables allowlist'],
+      [modeFor([],['Browse  Execute','Browse  Tabs','Browse  Status']).tools.length===3, 'preset names preserved'],
+      [modeFor(['--dry-run'],['Read Documentation']).dry, 'dry-run overrides config']
+    );
+    cases.push(
+      [checkSafety('Browse  Execute', 'Read public page') === null, 'preset browser execute eligible'],
+      [checkSafety('Browse  Tabs', 'List browser tabs') === null, 'preset browser tabs eligible'],
+      [checkSafety('Browse  Status', 'Read browser status') === null, 'preset browser status eligible'],
+      [checkSafety('Browse  Execute', 'git push origin main') !== null, 'preset retains keyword checks'],
+      [checkSafety('Browse Execute', 'Read public page') !== null, 'exact names only']
+    );
     if (cases.some(x => !x[0])) throw Error('SELF_TEST FAILED: '+cases.filter(x=>!x[0]).map(x=>x[1]).join(', '));
     return 'SELF_TEST PASS ('+cases.length+' cases)';
   }
-  log('monitor started once='+once+' dry='+dry+' fullAuto='+approveAll+' accessibilityTrusted='+$.AXIsProcessTrusted());
+  log('monitor started once='+once+' dry='+dry+' accessibilityTrusted='+$.AXIsProcessTrusted());
   if (once) { tick(dry); return 'done'; }
   let lastHeartbeat = 0;
   while (true) {

@@ -1,7 +1,7 @@
 #!/usr/bin/osascript -l JavaScript
 // Gemini Desktop continuous tool-permission monitor.
 // Uses macOS Accessibility APIs to observe Gemini Desktop permission prompts.
-// Audit-only by default. Active approval requires an explicit tool allowlist.
+// Audit-only by default. Automatic approval of recognized dialogs is explicit opt-in.
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
 ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['unsigned int']]);
@@ -18,6 +18,7 @@ function geminiIsFrontmost() {
 }
 // Defense in depth only: keyword checks cannot establish that an operation is safe.
 let allowedTools = [];
+let approveAll = false;
 const blockedPatterns = [
   'rm -rf','rm -r ','rm -f ','sudo ','git push','git reset --hard',
   'git clean -fd','git clean -df','diskutil erase','mkfs',
@@ -85,6 +86,7 @@ function allow(el) {
 }
 // Fail closed for unknown tools, opaque requests and obvious sensitive actions.
 function checkSafety(tool, detail) {
+  if (approveAll) return null;
   if (!allowedTools.includes(tool)) return 'tool not explicitly allowlisted';
   if (/call tool|terminal|shell|execute|script|command|write|edit|delete|upload|send|permission/i.test(tool))
     return 'generic or potentially mutating tool';
@@ -190,11 +192,13 @@ function tick(dry) {
 }
 function run(argv) {
   const once=argv.indexOf('--once')>=0;
-  const dry=argv.indexOf('--enable')<0 || argv.indexOf('--dry-run')>=0;
+  approveAll=argv.includes('--approve-all') && !argv.includes('--dry-run');
+  const dry=(!approveAll && !argv.includes('--enable')) || argv.includes('--dry-run');
   allowedTools=argv.filter(x=>x.startsWith('--allow-tool=')).map(x=>x.slice(13)).filter(Boolean);
-  if (!dry && !allowedTools.length) throw Error('Active mode requires --allow-tool=EXACT_TOOL_NAME');
+  if (!dry && !approveAll && !allowedTools.length) throw Error('Active mode requires --allow-tool=EXACT_TOOL_NAME');
 
   if (argv.indexOf('--self-test') >= 0) {
+    approveAll=false;
     allowedTools=['Read Documentation', 'Call Tool', 'Terminal Task'];
     const cases = [
       [toolOf('Allow Gemini to run Read Documentation on your machine?') === 'Read Documentation', 'prompt recognition'],
@@ -207,10 +211,19 @@ function run(argv) {
       [checkSafety('Read Documentation', 'git push origin main') !== null, 'push blocked'],
       [checkSafety('Terminal Task', 'echo test') !== null, 'terminal blocked']
     ];
+    cases.push(
+      [toolOf('Allow Gemini to run Call Tool on your machine?') === 'Call Tool', 'generic tool dialog'],
+      [toolOf('Allow Gemini to run Browse  Execute on your machine?') === 'Browse  Execute', 'browser execute dialog'],
+      [toolOf('Allow Gemini to run Browse  Tabs on your machine?') === 'Browse  Tabs', 'browser tabs dialog'],
+      [toolOf('Allow another app to run a tool?') === null, 'other app rejected']
+    );
+    approveAll=true;
+    cases.push([checkSafety('Call Tool', '') === null, 'full-auto recognizes generic tool']);
+    approveAll=false;
     if (cases.some(x => !x[0])) throw Error('SELF_TEST FAILED: '+cases.filter(x=>!x[0]).map(x=>x[1]).join(', '));
     return 'SELF_TEST PASS ('+cases.length+' cases)';
   }
-  log('monitor started once='+once+' dry='+dry+' accessibilityTrusted='+$.AXIsProcessTrusted());
+  log('monitor started once='+once+' dry='+dry+' fullAuto='+approveAll+' accessibilityTrusted='+$.AXIsProcessTrusted());
   if (once) { tick(dry); return 'done'; }
   let lastHeartbeat = 0;
   while (true) {

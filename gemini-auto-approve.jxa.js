@@ -4,6 +4,7 @@
 // Shared engine for empty and preconfigured exact-name allowlists.
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
+ObjC.bindFunction('CFRelease', ['void', ['id']]);
 ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['unsigned int']]);
 ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
 ObjC.bindFunction('AXUIElementPerformAction', ['int', ['id', 'id']]);
@@ -28,10 +29,11 @@ function log(s) {
   const stamp = new Date().toISOString();
   const line = stamp + ' | JXA ' + s + '\n';
   const fm = $.NSFileManager.defaultManager;
-  if (!fm.fileExistsAtPath(logPath)) {
+  if (!fm.fileExistsAtPath($(logPath))) {
     $(line).writeToFileAtomicallyEncodingError($(logPath), true, $.NSUTF8StringEncoding, null);
   } else {
     const f = $.NSFileHandle.fileHandleForWritingAtPath($(logPath));
+    if (!f) return;
     f.seekToEndOfFile;
     f.writeData($(line).dataUsingEncoding($.NSUTF8StringEncoding));
     f.closeFile;
@@ -41,7 +43,13 @@ function get(el, attr) {
   let r = Ref();
   const rc = $.AXUIElementCopyAttributeValue(el, attr, r);
   if (rc !== 0) return null;
-  return ObjC.deepUnwrap(r[0]);
+  const obj = r[0];
+  if (!obj) return null;
+  try {
+    return ObjC.deepUnwrap(obj);
+  } finally {
+    $.CFRelease(obj);
+  }
 }
 function val(el, attr) {
   const s = get(el, attr);
@@ -106,48 +114,55 @@ function findCandidates() {
   const found = [];
   for (let j=0;j<apps.count;j++) {
     const root = $.AXUIElementCreateApplication(apps.objectAtIndex(j).processIdentifier);
-    const windows = get(root, 'AXWindows') || [];
-    for (const win of windows) {
-      for (const e of descend(win, 1600)) {
-        if (val(e,'AXRole') !== 'AXStaticText') continue;
-        const tool = toolOf(val(e, 'AXValue'));
-        if (!tool) continue;
-        // Gemini nests the action buttons several groups above the prompt text.
-        let parent = e, nodes = [], allows = [], cancels = [];
-        for (let depth = 0; depth < 7; depth++) {
-          parent = get(parent, 'AXParent');
-          if (!parent) break;
-          nodes = descend(parent, 320);
-          allows = nodes.filter(allow);
-          cancels = nodes.filter(cancel);
-          if (allows.length === 1 && cancels.length === 1) break;
+    try {
+      const windows = get(root, 'AXWindows') || [];
+      for (const win of windows) {
+        for (const e of descend(win, 1600)) {
+          if (val(e,'AXRole') !== 'AXStaticText') continue;
+          const tool = toolOf(val(e, 'AXValue'));
+          if (!tool) continue;
+          // Gemini nests the action buttons several groups above the prompt text.
+          let parent = e, nodes = [], allows = [], cancels = [];
+          for (let depth = 0; depth < 7; depth++) {
+            parent = get(parent, 'AXParent');
+            if (!parent) break;
+            nodes = descend(parent, 320);
+            allows = nodes.filter(allow);
+            cancels = nodes.filter(cancel);
+            if (allows.length === 1 && cancels.length === 1) break;
+          }
+          if (allows.length !== 1 || cancels.length !== 1) {
+            diagnostic('buttons not found tool=' + tool);
+            continue;
+          }
+          const detailTexts = nodes.filter(x => ['AXStaticText','AXTextArea'].includes(val(x,'AXRole')))
+            .map(x => val(x,'AXValue'))
+            .filter(x => x && !x.startsWith('Allow Gemini to run '));
+          // Inspect all visible request details, including generic MCP wrappers.
+          const detail = detailTexts.join('\n');
+          if (detail.length > 12000) {
+            diagnostic('oversized request tool=' + tool);
+            continue;
+          }
+          found.push({tool:tool, allow:allows[0], detail:detail, signature:tool+'|'+detail});
         }
-        if (allows.length !== 1 || cancels.length !== 1) {
-          diagnostic('buttons not found tool=' + tool);
-          continue;
-        }
-        const detailTexts = nodes.filter(x => ['AXStaticText','AXTextArea'].includes(val(x,'AXRole')))
-          .map(x => val(x,'AXValue'))
-          .filter(x => x && !x.startsWith('Allow Gemini to run '));
-        // Inspect all visible request details, including generic MCP wrappers.
-        const detail = detailTexts.join('\n');
-        if (detail.length > 12000) {
-          diagnostic('oversized request tool=' + tool);
-          continue;
-        }
-        found.push({tool:tool, allow:allows[0], detail:detail, signature:tool+'|'+detail});
       }
+    } finally {
+      $.CFRelease(root);
     }
   }
   return found;
 }
 let lastSignature=null, lastPressTime=0, attempts=0, lastBlocked=null;
+let activeScans=0, hasPendingPrompt=false;
 function tick(dry) {
   if (!geminiIsRunning()) {
-    lastSignature=null; attempts=0; lastBlocked=null;
+    lastSignature=null; attempts=0; lastBlocked=null; hasPendingPrompt=false;
     return;
   }
+  activeScans++;
   const found = findCandidates();
+  hasPendingPrompt = found.length > 0;
   if (!found.length) { lastSignature=null; attempts=0; lastBlocked=null; lastDiagnostic=null; return; }
   if (found.length !== 1) {
     if (lastBlocked !== 'ambiguous') log('BLOCKED multiple permission dialogs');
@@ -215,6 +230,16 @@ function modeFor(argv, configTools) {
     (configured ? tools.length===0 : !argv.includes('--enable'));
   return {tools, dry};
 }
+function parseMaxRuntime(argv) {
+  const arg = argv.find(x => x.startsWith('--max-runtime='));
+  if (!arg) return 900;
+  const raw = arg.slice(14);
+  if (!/^\d+$/.test(raw)) throw Error('Invalid --max-runtime value');
+  return parseInt(raw, 10);
+}
+function rejectsMaxRuntime(flag) {
+  try { parseMaxRuntime([flag]); return false; } catch(e) { return true; }
+}
 function run(argv) {
   const once=argv.includes('--once');
   const configArg=argv.find(x=>x.startsWith('--config='));
@@ -266,11 +291,21 @@ function run(argv) {
       [checkSafety('Browse  Execute', 'git push origin main') !== null, 'preset retains keyword checks'],
       [checkSafety('Browse Execute', 'Read public page') !== null, 'exact names only']
     );
+    cases.push(
+      [parseMaxRuntime([]) === 900, 'default max runtime'],
+      [parseMaxRuntime(['--max-runtime=300']) === 300, 'custom max runtime'],
+      [parseMaxRuntime(['--max-runtime=0']) === 0, 'disable max runtime'],
+      [rejectsMaxRuntime('--max-runtime=-1') && rejectsMaxRuntime('--max-runtime=abc'), 'invalid max runtime rejected']
+    );
     if (cases.some(x => !x[0])) throw Error('SELF_TEST FAILED: '+cases.filter(x=>!x[0]).map(x=>x[1]).join(', '));
     return 'SELF_TEST PASS ('+cases.length+' cases)';
   }
   log('monitor started once='+once+' dry='+dry+' accessibilityTrusted='+$.AXIsProcessTrusted());
   if (once) { tick(dry); return 'done'; }
+  const startedAt = Date.now();
+  const maxRuntimeSec = parseMaxRuntime(argv);
+  const maxActiveScans = 600;
+  const minRecycleSec = 30;
   let lastHeartbeat = 0;
   while (true) {
     try {
@@ -280,6 +315,15 @@ function run(argv) {
       }
       tick(dry);
     } catch(e) { log('ERROR '+String(e).slice(0,170)); }
-    delay(0.8);
+    if (maxRuntimeSec > 0) {
+      const elapsedSec = (Date.now() - startedAt) / 1000;
+      const dueByTime = elapsedSec >= maxRuntimeSec;
+      const dueByScans = activeScans >= maxActiveScans && elapsedSec >= minRecycleSec;
+      if ((dueByTime || dueByScans) && (!hasPendingPrompt || elapsedSec >= maxRuntimeSec + 30)) {
+        log('RECYCLE runtime=' + Math.round(elapsedSec) + 's activeScans=' + activeScans);
+        return 'recycle';
+      }
+    }
+    $.NSThread.sleepForTimeInterval(0.8);
   }
 }

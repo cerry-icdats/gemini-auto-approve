@@ -5,4 +5,19 @@ config="$dir/config.json"
 if [ ! -e "$config" ]; then
   config="$dir/config.example.json"
 fi
-exec /usr/bin/osascript -l JavaScript "$dir/gemini-auto-approve.jxa.js" "--config=$config" "$@"
+for arg in "$@"; do
+  case "$arg" in
+    --once|--self-test|--check-config)
+      exec /usr/bin/osascript -l JavaScript "$dir/gemini-auto-approve.jxa.js" "--config=$config" "$@"
+      ;;
+  esac
+done
+trap 'exit 130' INT
+trap 'exit 143' TERM
+while true; do
+  rc=0
+  /usr/bin/osascript -l JavaScript "$dir/gemini-auto-approve.jxa.js" "--config=$config" "$@" >/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+done

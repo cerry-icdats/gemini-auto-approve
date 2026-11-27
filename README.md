@@ -93,6 +93,7 @@ tail -f ~/Library/Logs/gemini-auto-approve-runtime.log
 - Invalid configuration fails closed. Restart to reload configuration.
 - No login item is automatically installed.
 - Self-tests check parsing and policy, not live compatibility with every Gemini release.
+- To prevent macOS JXA autorelease-pool memory growth during multi-day runs, the script releases Accessibility CF objects and automatically recycles the `osascript` worker every 15 minutes (`--max-runtime=900`, set `--max-runtime=0` to disable); `./observe.sh` and `./auto-approve.sh` respawn it automatically.
 
 ## 简体中文
 
@@ -185,6 +186,7 @@ tail -f ~/Library/Logs/gemini-auto-approve-runtime.log
 ```
 
 按 Control-C 停止。追加 `--once` 仅扫描一次，追加 `--dry-run` 强制不点击。配置错误时停止，不会自动放宽权限。默认不安装开机启动项。自测不等于所有 Gemini 版本的真实界面验证。
+- 为避免长时间运行时 macOS JXA 自动释放池占用持续增长，脚本会显式释放 Accessibility CF 对象并每 15 分钟自动重启一次 `osascript` 工作进程（`--max-runtime=900`，传 `--max-runtime=0` 可关闭）；`./observe.sh` 与 `./auto-approve.sh` 会自动拉起新进程。
 
 ## License
 
